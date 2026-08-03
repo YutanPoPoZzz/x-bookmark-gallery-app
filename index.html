@@ -54,6 +54,33 @@
   }
   .empty, .loading { color: var(--sub); text-align: center; padding: 40px 16px; font-size: .9rem; }
 
+  /* --- 保存先チップ / 保存済みマーク / トースト --- */
+  #dest {
+    background: none; border: 1px solid var(--line); color: var(--sub);
+    border-radius: 999px; padding: 3px 10px; font-size: .7rem;
+    font-family: inherit; cursor: pointer; margin-left: auto;
+  }
+  #dest:hover { color: var(--ink); border-color: var(--accent); }
+  #dest.set { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+  #grid a.saved { outline: 2px solid var(--accent); outline-offset: -2px; }
+  #grid .saved-mark {
+    position: absolute; top: 5px; left: 5px;
+    background: var(--accent); color: #04252c; font-size: 11px; font-weight: 700;
+    padding: 1px 6px; border-radius: 7px;
+  }
+  #grid a.busy { opacity: .45; }
+  #toast {
+    position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%);
+    z-index: 200; max-width: min(92vw, 520px);
+    background: var(--panel); color: var(--ink);
+    border: 1px solid var(--line); border-left: 3px solid var(--accent);
+    border-radius: 8px; padding: 10px 14px; font-size: .82rem; line-height: 1.5;
+    box-shadow: 0 8px 24px #0009;
+    opacity: 0; pointer-events: none; transition: opacity .18s;
+  }
+  #toast.show { opacity: 1; }
+  #toast.err { border-left-color: #e2748a; }
+
   /* --- 合言葉ゲート --- */
   #gate {
     position: fixed; inset: 0; z-index: 100;
@@ -96,12 +123,14 @@
   <div class="title">
     <h1>📌 ブックマーク画像</h1>
     <span class="updated" id="updated"></span>
+    <button id="dest" title="右クリックで画像を保存する先のフォルダ">保存先: 未設定</button>
   </div>
   <div id="tabs"></div>
 </header>
 <main hidden id="body">
   <div id="grid"><div class="loading">読み込み中…</div></div>
 </main>
+<div id="toast"></div>
 
 <script>
   var STORE_KEY = 'xbm-gallery-pass';
@@ -114,6 +143,8 @@
   var msg = document.getElementById('msg');
   var DATA = {};
   var ENC = null;
+  var CUR = null;   // 表示中のフォルダ名
+  var SAVED = {};   // 保存済みツイートID
 
   function b64ToBytes(b64) {
     var bin = atob(b64);
@@ -161,15 +192,18 @@
   }
 
   function render(folder) {
+    CUR = folder;
     var items = DATA[folder] || [];
     if (!items.length) { grid.innerHTML = '<div class="empty">この分類は空です</div>'; }
     else {
-      grid.innerHTML = items.map(function (d) {
+      grid.innerHTML = items.map(function (d, i) {
         var tw = 'https://x.com/' + d.h + '/status/' + d.id;
         var thumb = d.u[0] + (d.u[0].indexOf('?') === -1 ? '?name=small' : '');
         var badge = d.n > 1 ? '<div class="badge">+' + (d.n - 1) + '</div>' : '';
-        return '<a href="' + tw + '" target="_blank" rel="noreferrer noopener">' +
-               '<img loading="lazy" src="' + thumb + '" alt="">' + badge + '</a>';
+        var done = SAVED[d.id] ? ' saved' : '';
+        var mark = SAVED[d.id] ? '<div class="saved-mark">保存済</div>' : '';
+        return '<a class="' + done.trim() + '" data-idx="' + i + '" href="' + tw + '" target="_blank" rel="noreferrer noopener">' +
+               '<img loading="lazy" src="' + thumb + '" alt="">' + badge + mark + '</a>';
       }).join('');
     }
     Array.prototype.forEach.call(tabs.children, function (b) {
@@ -177,6 +211,159 @@
     });
     window.scrollTo(0, 0);
   }
+
+  /* ===== 右クリックで リファレンスフォルダ に保存 ===== */
+
+  var DEST_NAME = 'リファレンス';          // 保存先として認めるフォルダ名
+  var IDB_NAME = 'xbm-gallery';
+  var IDB_STORE = 'handles';
+  var SAVED_KEY = 'xbm-gallery-saved';
+  var destHandle = null;
+  var destBtn = document.getElementById('dest');
+  var toastEl = document.getElementById('toast');
+  var toastTimer = null;
+
+  try { SAVED = JSON.parse(localStorage.getItem(SAVED_KEY) || '{}'); } catch (e) { SAVED = {}; }
+
+  function toast(text, isError) {
+    toastEl.textContent = text;
+    toastEl.className = 'show' + (isError ? ' err' : '');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { toastEl.className = ''; }, isError ? 6000 : 2600);
+  }
+
+  // ディレクトリハンドルは IndexedDB にしか入れられない(localStorage は不可)
+  function idb(mode, fn) {
+    return new Promise(function (resolve, reject) {
+      var req = indexedDB.open(IDB_NAME, 1);
+      req.onupgradeneeded = function () { req.result.createObjectStore(IDB_STORE); };
+      req.onerror = function () { reject(req.error); };
+      req.onsuccess = function () {
+        var db = req.result;
+        var tx = db.transaction(IDB_STORE, mode);
+        var out = fn(tx.objectStore(IDB_STORE));
+        tx.oncomplete = function () { db.close(); resolve(out && out.result); };
+        tx.onerror = function () { db.close(); reject(tx.error); };
+      };
+    });
+  }
+
+  function setDestLabel() {
+    if (destHandle) {
+      destBtn.textContent = '保存先: ' + destHandle.name;
+      destBtn.className = 'set';
+    } else {
+      destBtn.textContent = '保存先: 未設定';
+      destBtn.className = '';
+    }
+  }
+
+  // pick=true なら選択ダイアログを出す。false は記憶済みハンドルの復帰のみ。
+  async function ensureDest(pick) {
+    if (typeof window.showDirectoryPicker !== 'function') {
+      throw new Error('このブラウザはフォルダへの保存に対応していません（PCのChrome / Edge を使ってください）');
+    }
+    if (!destHandle) {
+      try { destHandle = await idb('readonly', function (s) { return s.get('dest'); }); } catch (e) { destHandle = null; }
+    }
+    if (destHandle) {
+      var perm = await destHandle.queryPermission({ mode: 'readwrite' });
+      if (perm !== 'granted') {
+        perm = await destHandle.requestPermission({ mode: 'readwrite' });
+        if (perm !== 'granted') {
+          throw new Error('フォルダへの書き込みが許可されませんでした。もう一度右クリックして「編集を許可」を選んでください');
+        }
+      }
+      setDestLabel();
+      return destHandle;
+    }
+    if (!pick) {
+      throw new Error('保存先が未設定です。右上の「保存先」ボタンから ' + DEST_NAME + ' フォルダを選んでください');
+    }
+    var picked;
+    try {
+      picked = await window.showDirectoryPicker({ id: 'xbm-ref', mode: 'readwrite', startIn: 'pictures' });
+    } catch (e) {
+      throw new Error('フォルダが選ばれませんでした');
+    }
+    if (picked.name !== DEST_NAME) {
+      throw new Error('「' + DEST_NAME + '」フォルダを選んでください（選ばれたのは「' + picked.name + '」です）');
+    }
+    destHandle = picked;
+    try { await idb('readwrite', function (s) { s.put(picked, 'dest'); }); } catch (e) {}
+    setDestLabel();
+    return destHandle;
+  }
+
+  function origUrl(u) { return u.split('?')[0] + '?name=orig'; }
+
+  function fileNameFor(item, url, i) {
+    var m = /\.([a-z0-9]{3,4})(?:$|\?)/i.exec(url.split('?')[0]);
+    var ext = m ? m[1].toLowerCase() : 'jpg';
+    var suffix = i > 0 ? '_' + (i + 1) : '';
+    return item.h + '_' + item.id + suffix + '.' + ext;
+  }
+
+  async function saveItem(item, card) {
+    var dir = await ensureDest(false);
+    var urls = item.u || [];
+    var saved = 0;
+    for (var i = 0; i < urls.length; i++) {
+      var url = origUrl(urls[i]);
+      var res = await fetch(url, { mode: 'cors', cache: 'no-store' });
+      if (!res.ok) throw new Error('画像を取得できませんでした（HTTP ' + res.status + '）');
+      var blob = await res.blob();
+      var fh = await dir.getFileHandle(fileNameFor(item, urls[i], i), { create: true });
+      var w = await fh.createWritable();
+      await w.write(blob);
+      await w.close();
+      saved++;
+    }
+    if (!saved) throw new Error('この投稿には保存できる画像がありません');
+    SAVED[item.id] = 1;
+    try { localStorage.setItem(SAVED_KEY, JSON.stringify(SAVED)); } catch (e) {}
+    if (card) {
+      card.classList.add('saved');
+      if (!card.querySelector('.saved-mark')) {
+        var mk = document.createElement('div');
+        mk.className = 'saved-mark';
+        mk.textContent = '保存済';
+        card.appendChild(mk);
+      }
+    }
+    return saved;
+  }
+
+  destBtn.addEventListener('click', function () {
+    ensureDest(true)
+      .then(function (d) { toast('保存先を ' + d.name + ' に設定しました。画像を右クリックで保存できます'); })
+      .catch(function (e) { toast(e.message, true); });
+  });
+
+  grid.addEventListener('contextmenu', function (ev) {
+    var card = ev.target.closest && ev.target.closest('a[data-idx]');
+    if (!card) return;
+    // Shift+右クリック はブラウザ標準のメニューを出す(逃げ道)
+    if (ev.shiftKey) return;
+    if (typeof window.showDirectoryPicker !== 'function') {
+      toast('このブラウザはフォルダへの保存に対応していません（PCのChrome / Edge を使ってください）', true);
+      return; // 標準メニューは出したままにする
+    }
+    ev.preventDefault();
+    if (card.classList.contains('busy')) return;
+    var item = (DATA[CUR] || [])[Number(card.dataset.idx)];
+    if (!item) { toast('画像の情報を取得できませんでした', true); return; }
+    card.classList.add('busy');
+    saveItem(item, card)
+      .then(function (n) { toast(n > 1 ? n + '枚を ' + DEST_NAME + ' に保存しました' : DEST_NAME + ' に保存しました'); })
+      .catch(function (e) { toast('保存に失敗: ' + e.message, true); })
+      .then(function () { card.classList.remove('busy'); });
+  });
+
+  // 記憶済みハンドルがあればラベルだけ先に出す(許可の確認は保存時)
+  idb('readonly', function (s) { return s.get('dest'); })
+    .then(function (h) { if (h) { destHandle = h; setDestLabel(); } })
+    .catch(function () {});
 
   function show(payload) {
     DATA = payload || {};
