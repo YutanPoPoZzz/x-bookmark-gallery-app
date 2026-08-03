@@ -60,6 +60,8 @@
     background: var(--bg);
     display: flex; align-items: center; justify-content: center; padding: 24px;
   }
+  /* ID指定の display:flex は UA の [hidden]{display:none} に勝ってしまうので明示的に消す */
+  #gate[hidden] { display: none; }
   #gate .box { width: 100%; max-width: 340px; text-align: center; }
   #gate h2 { font-size: 1.05rem; margin: 0 0 6px; font-weight: 700; }
   #gate p { color: var(--sub); font-size: .78rem; line-height: 1.6; margin: 0 0 18px; }
