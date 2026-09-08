@@ -28,8 +28,18 @@ function encrypt(data, passphrase) {
   const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
   const ct = Buffer.concat([cipher.update(gz), cipher.final(), cipher.getAuthTag()]);
 
-  let items = 0;
-  for (const arr of Object.values(data)) if (Array.isArray(arr)) items += arr.length;
+  // v2 は { v:2, img, text, watch } の封筒。それ以前は素の {フォルダ名: [...]}。
+  const buckets = data && data.v === 2
+    ? [data.img, data.text, data.watch]
+    : [data];
+  let items = 0, folders = 0;
+  for (const b of buckets) {
+    for (const arr of Object.values(b || {})) {
+      if (!Array.isArray(arr)) continue;
+      folders++;
+      items += arr.length;
+    }
+  }
 
   return {
     v: 1,
@@ -38,7 +48,7 @@ function encrypt(data, passphrase) {
     iv: iv.toString('base64'),
     gzip: true,
     updatedAt: new Date().toISOString(),
-    meta: { folders: Object.keys(data).length, items },
+    meta: { folders, items },
     ct: ct.toString('base64'),
   };
 }
